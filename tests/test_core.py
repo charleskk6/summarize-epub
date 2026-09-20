@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 from summarize_epub.cache import Cache
-from summarize_epub.chunker import TOKEN_RE, protect, restore, soup, split_chapter, token_error
+from summarize_epub.chunker import TOKEN_RE, canonicalize_tokens, protect, restore, soup, split_chapter, token_error
 from summarize_epub.config import Config
 from summarize_epub.epub_io import Result, read_epub, validate_navigation, write_epub, xml
 from summarize_epub.glossary import glossary_xhtml, parse_response
@@ -50,6 +50,30 @@ def test_multi_image_figure() -> None:
     assert len(soup(result).find_all("img")) == 3
     assert soup(result).figure.figcaption.get_text() == "Original"
     assert len(soup(result).find_all("figure")) == 1
+
+def test_nested_protected_restore() -> None:
+    original = '<pre><code>before <img src="nested.png"/> after</code></pre>'
+    prepared = protect(original)
+    # The visible chapter can contain only the outer CODE token; restoring it
+    # reveals the nested IMG token, which must then be restored in a second pass.
+    assert len(TOKEN_RE.findall(prepared.xhtml)) == 1
+    result = restore(prepared.xhtml, prepared.mapping)
+    assert len(soup(result).find_all("img")) == 1
+    assert soup(result).find("img")["src"] == "nested.png"
+    assert TOKEN_RE.search(result) is None
+
+
+def test_canonicalize_reordered_and_attribute_placeholders() -> None:
+    expected = ["[[IMG_1]]", "[[CODE_2]]"]
+    fragment = (
+        '<p data-bad="[[IMG_99]]">[[CODE_2]]</p>'
+        '<p>[[IMG_1]] [[IMG_1]]</p>'
+    )
+    fixed = canonicalize_tokens(fragment, expected)
+    assert TOKEN_RE.findall(fixed) == expected
+    assert "IMG_99" not in fixed
+    assert "data-bad" not in fixed
+
 
 def test_chunker() -> None:
     body = "<section id='s'>" + "".join(f"<div><h2>Heading {n}</h2><p>{'example ' * 80}</p></div>" for n in range(12)) + "</section>"
@@ -121,7 +145,7 @@ def test_mocked_pipeline_resume_and_fallback(tiny_epub: Path, tmp_path: Path) ->
             assert failed == [] and glossary == {"queue": "佇列"}
             assert len(soup(results[0].body).find_all("img")) == 1
             assert soup(results[0].body).pre.get_text() == soup(source.chapters[1].body).pre.get_text()
-            assert len(calls) == 5
+            assert len(calls) == 2
             final_context = json.loads(calls[-1]["messages"][1]["content"])
             assert final_context["glossary"] == {"queue": "佇列"}
             assert final_context["previous_chapter_summary"]
@@ -129,7 +153,7 @@ def test_mocked_pipeline_resume_and_fallback(tiny_epub: Path, tmp_path: Path) ->
         cache = Cache(tmp_path / "cache.sqlite")
         async with LLMClient(Config(api_key="test"), httpx.MockTransport(handler)) as client:
             again, terms, failed = await run_book(source, [2,3], client, cache, "test")
-            assert len(calls) == 5 and len(again) == 2 and terms == glossary
+            assert len(calls) == 2 and len(again) == 2 and terms == glossary
         cache.close()
     asyncio.run(run())
 
