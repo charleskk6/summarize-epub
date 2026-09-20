@@ -1,0 +1,7 @@
+EbookLib>=0.19,<0.21
+beautifulsoup4>=4.12,<5
+lxml>=5,<7
+httpx>=0.27,<1
+python-dotenv>=1,<2
+rich>=13,<15
+opencc-python-reimplemented>=0.1.7,<0.2
