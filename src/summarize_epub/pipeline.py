@@ -10,7 +10,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from .cache import Cache, cache_key
-from .chunker import TOKEN_RE, protect, repair_tokens, restore, soup, split_chapter, token_error
+from .chunker import TOKEN_RE, canonicalize_tokens, protect, restore, soup, split_chapter, token_error
 from .epub_io import Chapter, Result, Source, resolve_path
 from .glossary import parse_response, traditional
 from .llm_client import LLMClient, LLMError
@@ -93,16 +93,18 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
     chapter_terms = dict(terms)
     title = chapter.title
     for number, chunk in enumerate(chunks, 1):
+        expected = TOKEN_RE.findall(chunk)
         checkpoint = cache.chunk(scope, chapter.index, number)
         if checkpoint is not None:
-            collected.append(checkpoint["body"])
-            missing_at_end.extend(checkpoint["missing"])
+            # Old checkpoints may contain reordered, duplicated or missing
+            # placeholders. Canonicalize them locally so a code-only fix can
+            # resume without paying for the same LLM call again.
+            collected.append(canonicalize_tokens(checkpoint["body"], expected))
             chapter_terms.update(checkpoint["terms"])
             if number == 1:
                 title = checkpoint["title"]
             continue
         missing: list[str] = []
-        expected = TOKEN_RE.findall(chunk)
         context = {"mode": mode, "density": density, "chapter_title": chapter.title,
                    "part": number, "parts": len(chunks), "glossary": chapter_terms,
                    "previous_chapter_summary": previous[:12_000],
@@ -111,8 +113,7 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
                    "protected_reference_xhtml_read_only": {token: references[token] for token in expected}}
         payload = json.dumps(context, ensure_ascii=False, sort_keys=True)
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": payload}]
-        last_valid: tuple[str, str, dict[str, str]] | None = None
-        for attempt in range(4):  # Initial attempt plus up to THREE validation retries.
+        for attempt in range(4):  # Retries are for malformed XHTML/protocol responses, not placeholder ordering.
             envelope = json.dumps({"messages": messages, "validation_attempt": attempt, "endpoint": client.config.base_url,
                 "max_tokens": client.config.max_tokens, "temperature": client.config.temperature}, ensure_ascii=False, sort_keys=True)
             key = cache_key(client.config.model, PROMPT_VERSION, envelope)
@@ -123,21 +124,21 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
                 cache.put_response(key, response)
             try:
                 body, new_title, new_terms = parse_response(response, chapter_terms)
-                last_valid = body, new_title, new_terms
-                error = token_error(body, expected)
-                if error:
-                    raise ValueError("Placeholder validation: " + error)
+                placeholder_error = token_error(body, expected)
+                if placeholder_error:
+                    log.warning(
+                        "Chapter %s part %s placeholder repair: %s",
+                        chapter.index, number, placeholder_error,
+                    )
+                body = canonicalize_tokens(body, expected)
+                repaired_error = token_error(body, expected)
+                if repaired_error:
+                    raise ValueError("Placeholder canonicalization failed: " + repaired_error)
                 break
             except ValueError as error:
                 log.warning("Chapter %s part %s validation attempt %s: %s", chapter.index, number, attempt + 1, error)
                 if attempt == 3:
-                    if last_valid is None:
-                        raise ValueError("No valid XHTML/glossary after three retries") from None
-                    body, new_title, new_terms = last_valid
-                    body, missing = repair_tokens(body, expected)
-                    missing_at_end.extend(missing)
-                    log.warning("Chapter %s: placeholder fallback; appending %s missing objects at chapter end", chapter.index, len(missing))
-                    break
+                    raise
                 messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": payload},
                             {"role": "assistant", "content": response},
                             {"role": "user", "content": f"Repair the complete response. {error}. Expected placeholders in order: {expected}. Return both XHTML siblings."}]
@@ -152,7 +153,7 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
     original_images = soup(chapter.body).find_all("img")
     output_images = soup(combined).find_all("img")
     if len(output_images) != len(original_images):
-        raise ValueError("Restored image count differs from source; retaining original chapter")
+        raise ValueError(f"Restored image count differs from source; source={len(original_images)} output={len(output_images)}; retaining original chapter")
     # Compare full attribute multisets, not just image counts.
     def attrs(images: list[Any]) -> list[str]:
         return sorted(json.dumps(img.attrs, sort_keys=True) for img in images)
