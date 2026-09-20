@@ -133,6 +133,48 @@ def test_mocked_pipeline_resume_and_fallback(tiny_epub: Path, tmp_path: Path) ->
         cache.close()
     asyncio.run(run())
 
+def test_previous_part_context_strips_placeholders(tiny_epub: Path, tmp_path: Path) -> None:
+    from dataclasses import replace
+    source = read_epub(tiny_epub)
+    chapter = source.chapters[1]
+    body = (
+        '<section><h2>Part 1</h2><p>' + ('example ' * 120) +
+        '</p><figure><img src="images/diagram.png"/><figcaption>Diagram</figcaption></figure></section>'
+        '<section><h2>Part 2</h2><p>' + ('example ' * 120) + '</p></section>'
+    )
+    source.chapters[1] = replace(chapter, body=body, images=1)
+    contexts: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        context = json.loads(json.loads(request.content)["messages"][1]["content"])
+        contexts.append(context)
+        tokens = TOKEN_RE.findall(context["source_xhtml"])
+        text = (
+            '<section data-role="summary" data-title="範例"><p>範例說明。</p>'
+            + "\n".join(tokens)
+            + '</section><dl data-role="glossary"><dt>example</dt><dd>範例</dd></dl>'
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": text}, "finish_reason": "stop"}]},
+        )
+
+    async def run() -> None:
+        cache = Cache(tmp_path / "context.sqlite")
+        async with LLMClient(Config(api_key="test"), httpx.MockTransport(handler)) as client:
+            results, _, failed = await run_book(
+                source, [2], client, cache, "context", chunk_tokens=500
+            )
+            assert failed == []
+            assert len(soup(results[0].body).find_all("img")) == 1
+        cache.close()
+
+    asyncio.run(run())
+    assert len(contexts) > 1
+    for context in contexts[1:]:
+        assert TOKEN_RE.search(context["previous_part_summary"]) is None
+
+
 def test_failure_keeps_original(tiny_epub: Path, tmp_path: Path) -> None:
     source = read_epub(tiny_epub)
     def handler(request: httpx.Request) -> httpx.Response:
