@@ -37,18 +37,26 @@ def protect(fragment: str) -> Prepared:
     if TOKEN_RE.search(doc.get_text()):
         raise ValueError("Source contains reserved placeholder tokens")
     mapping: dict[str, Protected] = {}
-    # Preserve entire figures, captions and all img attributes for reconstruction.
-    figures = {id(f): str(f) for f in doc.find_all("figure")}
+
+    # A figure is one atomic protected object, even when it contains several images.
+    # This prevents the model from having to preserve/deduplicate one IMG token per
+    # image and makes reconstruction deterministic.
+    for figure in list(doc.find_all("figure")):
+        if figure.parent is None:
+            continue
+        kind = "IMG" if figure.find("img") is not None else "MEDIA"
+        token = f"[[{kind}_{len(mapping) + 1}]]"
+        mapping[token] = Protected(str(figure))
+        figure.replace_with(NavigableString("\n" + token + "\n"))
+
+    # Images outside figures are protected individually.
     for img in list(doc.find_all("img")):
         token = f"[[IMG_{len(mapping) + 1}]]"
-        figure = img.find_parent("figure")
-        mapping[token] = Protected(str(img), figures.get(id(figure)), str(id(figure)) if figure else None)
+        mapping[token] = Protected(str(img))
         img.replace_with(NavigableString("\n" + token + "\n"))
+
     for tag in list(doc.find_all(["pre", "svg", "object", "code"])):
         if tag.parent is None or tag.find_parent(["pre", "code", "svg", "object"]):
-            continue
-        # Figures are restored as complete units, including their captions/code.
-        if tag.find_parent("figure"):
             continue
         kind = "CODE" if tag.name in {"pre", "code"} else "MEDIA"
         token = f"[[{kind}_{len(mapping) + 1}]]"
