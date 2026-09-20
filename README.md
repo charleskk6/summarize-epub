@@ -57,8 +57,8 @@ terminology consistency; image descriptions use asynchronous concurrency.
 Output preserves selected source document order, stable chapter filenames, images,
 code and original assets. It includes EPUB 3 navigation, NCX, h2 links, and a glossary.
 Omitted-chapter links become plain text. Failed chapters keep their English originals
-and are reported. Missing placeholders are retried three times, then restored at
-chapter end. The editable system prompt lives in `src/summarize_epub/prompts.py`.
+and are reported. Malformed XHTML/protocol responses are retried. Placeholder ordering, duplicates and
+missing protected objects are repaired deterministically from source order without another paid call. The editable system prompt lives in `src/summarize_epub/prompts.py`.
 
 ```bash
 pip install -e '.[test]'
