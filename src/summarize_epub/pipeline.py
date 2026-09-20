@@ -106,7 +106,7 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
         context = {"mode": mode, "density": density, "chapter_title": chapter.title,
                    "part": number, "parts": len(chunks), "glossary": chapter_terms,
                    "previous_chapter_summary": previous[:12_000],
-                   "previous_part_summary": "".join(collected)[-6000:],
+                   "previous_part_summary": soup(TOKEN_RE.sub("", "".join(collected))).get_text(" ", strip=True)[-6000:],
                    "source_xhtml": chunk,
                    "protected_reference_xhtml_read_only": {token: references[token] for token in expected}}
         payload = json.dumps(context, ensure_ascii=False, sort_keys=True)
