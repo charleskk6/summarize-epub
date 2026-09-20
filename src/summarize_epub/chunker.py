@@ -88,41 +88,103 @@ def repair_tokens(fragment: str, expected: list[str]) -> tuple[str, list[str]]:
     return TOKEN_RE.sub(replace, fragment), [t for t in expected if t not in seen]
 
 
+def canonicalize_tokens(fragment: str, expected: list[str]) -> str:
+    """Make model-emitted placeholders deterministic without another API call.
+
+    Placeholder *positions* from the model are retained where possible, but the
+    identities are reassigned to source order. Extra/invented occurrences are
+    removed and missing source placeholders are appended at the end. Tokens that
+    the model placed in attributes are stripped from those attributes because
+    protected objects may only be restored from text nodes.
+    """
+    doc = soup(fragment)
+
+    for tag in doc.find_all(True):
+        for key, value in list(tag.attrs.items()):
+            if isinstance(value, list):
+                raw = " ".join(str(x) for x in value)
+            else:
+                raw = str(value)
+            if not TOKEN_RE.search(raw):
+                continue
+            cleaned = TOKEN_RE.sub("", raw).strip()
+            if cleaned:
+                tag.attrs[key] = cleaned
+            else:
+                del tag.attrs[key]
+
+    used = 0
+    for node in list(doc.find_all(string=TOKEN_RE)):
+        def replace(_: re.Match[str]) -> str:
+            nonlocal used
+            if used >= len(expected):
+                return ""
+            token = expected[used]
+            used += 1
+            return token
+        node.replace_with(NavigableString(TOKEN_RE.sub(replace, str(node))))
+
+    if used < len(expected):
+        doc.root.append(NavigableString("\n" + "\n".join(expected[used:]) + "\n"))
+
+    return "".join(str(x) for x in doc.root.contents)
+
+
 def restore(fragment: str, mapping: dict[str, Protected]) -> str:
     doc = soup(fragment)
     restored_figures: set[str] = set()
-    for node in list(doc.find_all(string=TOKEN_RE)):
-        pieces = TOKEN_RE.split(str(node))
-        tokens = TOKEN_RE.findall(str(node))
-        replacements: list[Tag | NavigableString] = []
-        for i, piece in enumerate(pieces):
-            if piece:
-                replacements.append(NavigableString(piece))
-            if i == len(tokens):
-                continue
-            value = mapping[tokens[i]]
-            if value.figure_key:
-                # Discard the model's figure shell/caption; source figure is authoritative.
-                parent = node.find_parent("figure")
-                if parent is not None:
-                    for caption in list(parent.find_all("figcaption")):
-                        caption.decompose()
-                    parent.unwrap()
-                if value.figure_key in restored_figures:
+
+    # Restoring an outer protected block can reveal placeholders that were nested
+    # inside it when protect() ran (for example an image inside a protected object).
+    # Keep resolving until no protected placeholder remains.
+    while True:
+        nodes = list(doc.find_all(string=TOKEN_RE))
+        if not nodes:
+            break
+        restored_any = False
+        for node in nodes:
+            pieces = TOKEN_RE.split(str(node))
+            tokens = TOKEN_RE.findall(str(node))
+            replacements: list[Tag | NavigableString] = []
+            for i, piece in enumerate(pieces):
+                if piece:
+                    replacements.append(NavigableString(piece))
+                if i == len(tokens):
                     continue
-                restored_figures.add(value.figure_key)
-            original = soup(value.figure or value.tag)
-            replacements.extend(list(original.root.contents))
-        for replacement in replacements:
-            node.insert_before(replacement)
-        node.extract()
+                token = tokens[i]
+                if token not in mapping:
+                    raise ValueError(f"Unknown protected placeholder during restore: {token}")
+                value = mapping[token]
+                if value.figure_key:
+                    # Compatibility with caches created by the older per-image
+                    # figure protection scheme.
+                    parent = node.find_parent("figure")
+                    if parent is not None:
+                        for caption in list(parent.find_all("figcaption")):
+                            caption.decompose()
+                        parent.unwrap()
+                    if value.figure_key in restored_figures:
+                        continue
+                    restored_figures.add(value.figure_key)
+                original = soup(value.figure or value.tag)
+                replacements.extend(list(original.root.contents))
+                restored_any = True
+            for replacement in replacements:
+                node.insert_before(replacement)
+            node.extract()
+        if not restored_any:
+            break
+
+    leftovers = TOKEN_RE.findall("".join(str(x) for x in doc.root.contents))
+    if leftovers:
+        raise ValueError(f"Protected placeholders remained after restore: {leftovers}")
+
     # Block-level images/figures may have been placed inside model paragraphs.
     for block in list(doc.find_all(["figure", "pre", "div", "section"])):
         parent = block.find_parent("p")
         if parent is not None:
             parent.unwrap()
     return "".join(str(x) for x in doc.root.contents)
-
 
 def split_chapter(fragment: str, limit: int = 20_000,
                   references: dict[str, str] | None = None) -> list[str]:
