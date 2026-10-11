@@ -27,6 +27,25 @@ class Config:
         if self.language not in {"en", "zh-Hant"}:
             raise ValueError("language must be en or zh-Hant")
 
+    def uses_local_ollama(self, *, describe_images: bool = False) -> bool:
+        """Recognize the standard loopback Ollama endpoint, not arbitrary proxies.
+
+        Cloud-tagged models served through local Ollama still need the remote
+        billing UI. Only include the vision model when image requests are enabled.
+        """
+        url = urlsplit(self.base_url)
+        try:
+            local = (url.scheme in {"http", "https"}
+                     and url.hostname in {"localhost", "127.0.0.1", "::1"}
+                     and url.port == 11434 and url.path.rstrip("/") == "/v1"
+                     and not (url.username or url.password or url.query or url.fragment))
+        except ValueError:
+            return False
+        models = [self.model]
+        if describe_images:
+            models.append(self.vision_model or self.model)
+        return local and all("cloud" not in model.lower() for model in models)
+
     @classmethod
     def load(cls, cli: Mapping[str, Any], *, env: Mapping[str, str] | None = None,
              dotenv_path: Path | None = Path(".env"), require_key: bool = True) -> Config:

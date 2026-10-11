@@ -62,6 +62,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def estimate_cost(chapter: Chapter, cfg: Config, density: str = "balanced", mode: str = "summary") -> float:
+    if cfg.uses_local_ollama():
+        return 0.0
     ratio = 1 if mode == "full" else {"tight": .25, "balanced": .5, "full": .7}[density]
     incoming = estimate_tokens(chapter.body) + estimate_tokens(system_prompt(cfg.language))
     # Chinese output tokenization differs materially from English.
@@ -69,9 +71,12 @@ def estimate_cost(chapter: Chapter, cfg: Config, density: str = "balanced", mode
     return (incoming * cfg.input_price + outgoing * cfg.output_price) / 1_000_000
 
 
-def show_table(console: Console, chapters: list[Chapter], cfg: Config, density: str = "balanced", mode: str = "summary") -> None:
+def show_table(console: Console, chapters: list[Chapter], cfg: Config, density: str = "balanced", mode: str = "summary",
+               *, describe_images: bool = False) -> None:
     table = Table("Index", "Chapter title", "Words", "Images", "Est. USD")
-    priced = bool(cfg.input_price or cfg.output_price)
+    local = cfg.uses_local_ollama(describe_images=describe_images)
+    mixed = describe_images and cfg.uses_local_ollama() and not local
+    priced = local or (bool(cfg.input_price or cfg.output_price) and not mixed)
     total = 0.0
     for chapter in chapters:
         cost = estimate_cost(chapter, cfg, density, mode)
@@ -81,7 +86,10 @@ def show_table(console: Console, chapters: list[Chapter], cfg: Config, density: 
     table.add_row("TOTAL", f"{len(chapters)} documents", str(sum(c.words for c in chapters)),
                   str(sum(c.images for c in chapters)), f"${total:.4f}" if priced else "n/a", style="bold")
     console.print(table)
-    console.print("Estimates exclude retries, image descriptions and accumulated context; set input/output prices for USD estimates.")
+    if local:
+        console.print("Local Ollama: $0.0000 API cost. Runs on your computer.")
+    else:
+        console.print("Estimates exclude retries, image descriptions and accumulated context; set input/output prices for USD estimates.")
 
 
 def digest(value: Any) -> str:
@@ -113,7 +121,7 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
         elif not explicit:
             if not interactive:
                 raise ValueError("Non-interactive run needs --chapters, --chapter-titles, or --all")
-            show_table(console, source.chapters, cfg, args.density, args.mode)
+            show_table(console, source.chapters, cfg, args.density, args.mode, describe_images=args.describe_images)
             expression = console.input("Chapters (e.g. 3-7, 1,4,9-12, 3-, all): ")
             selected = resolve(source.chapters, expression, exclude=args.exclude, skip_front_matter=args.skip_front_matter)
             choice = console.input("Enter for all selected, or 'preview' for the first selected chapter: ").strip().lower()
@@ -127,7 +135,8 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
             selected = selected[:1]
         console.print("Will process source indices: " + ", ".join(map(str, selected)))
         console.print("Output language: " + cfg.language)
-        show_table(console, [source.chapters[i - 1] for i in selected], cfg, args.density, args.mode)
+        local = cfg.uses_local_ollama(describe_images=args.describe_images)
+        show_table(console, [source.chapters[i - 1] for i in selected], cfg, args.density, args.mode, describe_images=args.describe_images)
         if args.dry_run:
             console.print("Dry run: no API calls made.")
             return 0
@@ -140,7 +149,7 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
         # Saved selection means this run has already been explicitly confirmed.
         confirmation_key = "confirmed:" + scope
         confirmed = cache.selection(confirmation_key) is not None and not args.no_cache
-        if interactive and not confirmed:
+        if interactive and not confirmed and not local:
             if console.input("Proceed with paid API calls? [y/N]: ").strip().lower() not in {"y", "yes"}:
                 console.print("Cancelled; no API calls made.")
                 return 0
@@ -157,7 +166,13 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
                 console.print(report, markup=False)
             console.print(f"Wrote {args.output}", markup=False)
             cost = (client.input_tokens * cfg.input_price + client.output_tokens * cfg.output_price) / 1_000_000
-            console.print(f"This invocation: {client.input_tokens} input / {client.output_tokens} output tokens reported by API; estimated cost ${cost:.4f}" if cfg.input_price or cfg.output_price else f"This invocation: {client.input_tokens} input / {client.output_tokens} output tokens reported by API; cost unpriced.")
+            usage = f"This invocation: {client.input_tokens} input / {client.output_tokens} output tokens reported by API"
+            if local:
+                console.print(usage + "; API cost $0.0000 (local Ollama).")
+            elif args.describe_images and cfg.uses_local_ollama():
+                console.print(usage + "; cost unpriced (cloud image descriptions).")
+            else:
+                console.print(usage + (f"; estimated cost ${cost:.4f}" if cfg.input_price or cfg.output_price else "; cost unpriced."))
             if failures:
                 console.print("Kept original content for failed chapters: " + ", ".join(map(str, failures)))
                 return 2

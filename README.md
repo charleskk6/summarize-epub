@@ -54,6 +54,15 @@ zero means unpriced. Estimates exclude retries, images and accumulated context.
 
 ## Resume, output and tests
 
+Local Ollama at `http://localhost:11434/v1` (also `127.0.0.1` or `[::1]`)
+automatically shows `$0.0000` API cost in the table and final usage report, and
+skips the paid-API confirmation. Existing cloud price settings are ignored for
+local runs. Explicit chapter selection runs immediately; interactive chapter
+selection still works. Keep `LLM_API_KEY=ollama` as the placeholder key.
+This detection assumes the standard local endpoint serves local models. Names
+containing `cloud`, including an active vision model, retain the remote billing UI.
+Other endpoints/ports retain the existing pricing and confirmation behavior.
+
 SQLite saves completed responses, selected indices, glossary and image hashes.
 English and Chinese responses, checkpoints, glossaries and generated image captions
 use separate cache keys, so changing language cannot resume the other language's output.
