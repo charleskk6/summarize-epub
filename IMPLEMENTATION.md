@@ -1,7 +1,7 @@
 # summarize-epub
 
 Python 3.11+ CLI that summarises selected English EPUB spine documents in
-Traditional Chinese, preserving original images, code, CSS and fonts.
+English or Traditional Chinese, preserving original images, code, CSS and fonts.
 
 ## Install and use
 
@@ -56,6 +56,15 @@ Every environment setting has a CLI equivalent:
 | `LLM_CONCURRENCY` | `--concurrency` | 4 |
 | `LLM_INPUT_PRICE` | `--input-price` | 0 (unpriced) |
 | `LLM_OUTPUT_PRICE` | `--output-price` | 0 (unpriced) |
+| `LLM_LANGUAGE` | `--language` | `zh-Hant` (or `en` for English) |
+
+The language setting controls prose, headings, chapter titles, generated captions,
+glossary labels, navigation and EPUB metadata. English mode skips OpenCC conversion.
+Code and original protected captions/figures remain unchanged in either language.
+Chapter/chunk/glossary scopes and response/caption keys include language. Captions
+also include the vision model, endpoint and prompt version. Existing cache entries
+from an older prompt version are not reused; the first run after upgrading may make
+new paid requests. Use `--dry-run` first to inspect the selected language.
 
 `--mode summary` is the default; `full` translates all prose without condensation.
 `--density tight|balanced|full` targets approximately 25%, 30–50%, or 60–70% of the
@@ -151,3 +160,4 @@ Endpoint references:
 
 The source package is tested offline with mock responses; it has not been exercised
 against paid live provider accounts.
+

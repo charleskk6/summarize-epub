@@ -21,6 +21,11 @@ class Config:
     concurrency: int = 4
     input_price: float = 0.0
     output_price: float = 0.0
+    language: str = "zh-Hant"
+
+    def __post_init__(self) -> None:
+        if self.language not in {"en", "zh-Hant"}:
+            raise ValueError("language must be en or zh-Hant")
 
     @classmethod
     def load(cls, cli: Mapping[str, Any], *, env: Mapping[str, str] | None = None,
@@ -51,3 +56,4 @@ class Config:
         if url.scheme not in {"http", "https"} or not url.netloc or url.username or url.password or url.query:
             raise ValueError("base-url must be an HTTP(S) URL without credentials or a query")
         return cfg
+

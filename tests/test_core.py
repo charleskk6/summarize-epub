@@ -5,7 +5,8 @@ import zipfile
 from pathlib import Path
 import httpx
 import pytest
-from summarize_epub.cache import Cache
+from summarize_epub.cache import Cache, cache_key
+from summarize_epub.prompts import PROMPT_VERSION
 from summarize_epub.chunker import TOKEN_RE, canonicalize_tokens, protect, restore, soup, split_chapter, token_error
 from summarize_epub.config import Config
 from summarize_epub.epub_io import Result, read_epub, validate_navigation, write_epub, xml
@@ -236,10 +237,12 @@ def test_completed_chunk_resume_after_later_failure(tiny_epub: Path, tmp_path: P
             _, _, failures = await run_book(source, [2], client, cache, "partial", chunk_tokens=300)
             assert failures == [2] and calls == [1, 2]
             # Simulate terminology learned by a later successfully processed chapter.
-            cache.complete_chapter("partial", 3, {"body":"<p>完成</p>", "title":"完成"}, {"other": "其他"})
+            scope = cache_key(client.config.language, PROMPT_VERSION, "partial")
+            cache.complete_chapter(scope, 3, {"body":"<p>完成</p>", "title":"完成"}, {"other": "其他"})
             failing = False
             _, terms, failures = await run_book(source, [2], client, cache, "partial", chunk_tokens=300)
             assert failures == [] and calls == [1, 2, 2, 3]
             assert terms == {"example": "範例", "other": "其他"}
         cache.close()
     asyncio.run(run())
+

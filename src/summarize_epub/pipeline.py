@@ -14,7 +14,7 @@ from .chunker import TOKEN_RE, canonicalize_tokens, protect, restore, soup, spli
 from .epub_io import Chapter, Result, Source, resolve_path
 from .glossary import parse_response, traditional
 from .llm_client import LLMClient, LLMError
-from .prompts import PROMPT_VERSION, SYSTEM_PROMPT, VISION_PROMPT
+from .prompts import PROMPT_VERSION, system_prompt, vision_prompt
 
 
 async def describe_images(body: str, chapter: Chapter, source: Source, client: LLMClient, cache: Cache) -> str:
@@ -38,25 +38,29 @@ async def describe_images(body: str, chapter: Chapter, source: Source, client: L
         images.append((img, digest))
 
     async def describe(digest: str, data: bytes, mime: str) -> tuple[str, str]:
-        hit = cache.caption(digest)
+        caption_key = cache_key(client.config.vision_model, PROMPT_VERSION, json.dumps(
+            [digest, client.config.language, client.config.base_url, vision_prompt(client.config.language)]))
+        hit = cache.caption(caption_key)
         if hit is not None:
             return digest, hit
         content: list[dict[str, Any]] = [
-            {"type": "text", "text": VISION_PROMPT},
+            {"type": "text", "text": vision_prompt(client.config.language)},
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode()}},
         ]
         try:
             value = await client.complete([{"role": "user", "content": content}], client.config.vision_model)
             # Treat generated captions as text; never interpret returned markup.
             from opencc import OpenCC
-            value = OpenCC("s2twp").convert(value.strip())
+            value = value.strip()
+            if client.config.language == "zh-Hant":
+                value = OpenCC("s2twp").convert(value)
         except LLMError as error:
             log.warning("Image description skipped: %s", error)
             # Permanent unsupported-media/model responses are negative-cached.
             if error.status in {400, 404, 415, 422}:
-                cache.save_caption(digest, "")
+                cache.save_caption(caption_key, "")
             return digest, ""
-        cache.save_caption(digest, value)
+        cache.save_caption(caption_key, value)
         return digest, value
 
     descriptions = dict(await asyncio.gather(*(describe(d, *job) for d, job in jobs.items())))
@@ -76,7 +80,7 @@ async def describe_images(body: str, chapter: Chapter, source: Source, client: L
             classes = str(caption.get("class", "")).split()
             caption["class"] = " ".join(dict.fromkeys(classes + ["ai-caption"]))
         paragraph = doc.new_tag("p", attrs={"class": "ai-caption"})
-        paragraph.string = "AI 圖解：" + description
+        paragraph.string = ("AI description: " if client.config.language == "en" else "AI 圖解：") + description
         caption.append(paragraph)
     return "".join(str(x) for x in doc.root.contents)
 
@@ -85,6 +89,7 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
                           terms: dict[str, str], previous: str, mode: str, density: str,
                           chunk_tokens: int, describe: bool, scope: str) -> tuple[Result, dict[str, str]]:
     log = logging.getLogger(__name__)
+    prompt = system_prompt(client.config.language)
     prepared = protect(chapter.body)
     references = {token: value.tag for token, value in prepared.mapping.items()}
     chunks = split_chapter(prepared.xhtml, chunk_tokens, references)
@@ -105,14 +110,14 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
                 title = checkpoint["title"]
             continue
         missing: list[str] = []
-        context = {"mode": mode, "density": density, "chapter_title": chapter.title,
+        context = {"mode": mode, "density": density, "language": client.config.language, "chapter_title": chapter.title,
                    "part": number, "parts": len(chunks), "glossary": chapter_terms,
                    "previous_chapter_summary": previous[:12_000],
                    "previous_part_summary": soup(TOKEN_RE.sub("", "".join(collected))).get_text(" ", strip=True)[-6000:],
                    "source_xhtml": chunk,
                    "protected_reference_xhtml_read_only": {token: references[token] for token in expected}}
         payload = json.dumps(context, ensure_ascii=False, sort_keys=True)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": payload}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}, {"role": "user", "content": payload}]
         for attempt in range(4):  # Retries are for malformed XHTML/protocol responses, not placeholder ordering.
             envelope = json.dumps({"messages": messages, "validation_attempt": attempt, "endpoint": client.config.base_url,
                 "max_tokens": client.config.max_tokens, "temperature": client.config.temperature}, ensure_ascii=False, sort_keys=True)
@@ -123,7 +128,7 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
                 # Commit before parsing, so even an interrupted validation can resume.
                 cache.put_response(key, response)
             try:
-                body, new_title, new_terms = parse_response(response, chapter_terms)
+                body, new_title, new_terms = parse_response(response, chapter_terms, client.config.language)
                 placeholder_error = token_error(body, expected)
                 if placeholder_error:
                     log.warning(
@@ -139,7 +144,7 @@ async def process_chapter(chapter: Chapter, source: Source, client: LLMClient, c
                 log.warning("Chapter %s part %s validation attempt %s: %s", chapter.index, number, attempt + 1, error)
                 if attempt == 3:
                     raise
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": payload},
+                messages = [{"role": "system", "content": prompt}, {"role": "user", "content": payload},
                             {"role": "assistant", "content": response},
                             {"role": "user", "content": f"Repair the complete response. {error}. Expected placeholders in order: {expected}. Return both XHTML siblings."}]
         if number == 1:
@@ -169,6 +174,8 @@ async def run_book(source: Source, selected: list[int], client: LLMClient, cache
                    chunk_tokens: int = 20_000, describe: bool = False,
                    progress: Callable[[int], None] | None = None) -> tuple[list[Result], dict[str, str], list[int]]:
     log = logging.getLogger(__name__)
+    # Namespace checkpoints/glossary even for direct callers reusing a scope.
+    scope = cache_key(client.config.language, PROMPT_VERSION, scope)
     terms = cache.load_glossary(scope)
     previous = ""
     results: list[Result] = []
@@ -199,3 +206,4 @@ async def run_book(source: Source, selected: list[int], client: LLMClient, cache
         if progress:
             progress(index)
     return results, terms, failed
+

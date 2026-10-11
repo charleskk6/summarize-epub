@@ -20,7 +20,7 @@ from .epub_io import Chapter, read_epub, write_epub
 from .glossary import glossary_xhtml
 from .llm_client import LLMClient
 from .pipeline import run_book
-from .prompts import PROMPT_VERSION, SYSTEM_PROMPT
+from .prompts import PROMPT_VERSION, system_prompt
 from .selection import resolve
 
 
@@ -30,7 +30,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Traditional Chinese summaries with original EPUB images")
+    root = argparse.ArgumentParser(description="English or Traditional Chinese summaries with original EPUB images")
     sub = root.add_subparsers(dest="command", required=True)
     for command in ("list", "run"):
         cmd = sub.add_parser(command)
@@ -40,6 +40,8 @@ def parser() -> argparse.ArgumentParser:
                            ("concurrency", int), ("input-price", float), ("output-price", float)):
             cmd.add_argument("--" + name, type=kind, default=None)
         cmd.add_argument("--verbose", action="store_true")
+        cmd.add_argument("--language", choices=("en", "zh-Hant"), default=None,
+                         help="Output language (default: LLM_LANGUAGE or zh-Hant)")
         if command == "list":
             continue
         cmd.add_argument("-o", "--output", type=Path, required=True)
@@ -61,9 +63,9 @@ def parser() -> argparse.ArgumentParser:
 
 def estimate_cost(chapter: Chapter, cfg: Config, density: str = "balanced", mode: str = "summary") -> float:
     ratio = 1 if mode == "full" else {"tight": .25, "balanced": .5, "full": .7}[density]
-    incoming = estimate_tokens(chapter.body) + estimate_tokens(SYSTEM_PROMPT)
+    incoming = estimate_tokens(chapter.body) + estimate_tokens(system_prompt(cfg.language))
     # Chinese output tokenization differs materially from English.
-    outgoing = estimate_tokens(chapter.body) * ratio * 2
+    outgoing = estimate_tokens(chapter.body) * ratio * (2 if cfg.language == "zh-Hant" else 1)
     return (incoming * cfg.input_price + outgoing * cfg.output_price) / 1_000_000
 
 
@@ -124,6 +126,7 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
         if preview:
             selected = selected[:1]
         console.print("Will process source indices: " + ", ".join(map(str, selected)))
+        console.print("Output language: " + cfg.language)
         show_table(console, [source.chapters[i - 1] for i in selected], cfg, args.density, args.mode)
         if args.dry_run:
             console.print("Dry run: no API calls made.")
@@ -131,7 +134,8 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
         settings = {"source": source.digest, "indices": selected, "model": cfg.model, "endpoint": cfg.base_url,
                     "vision_model": cfg.vision_model, "max_tokens": cfg.max_tokens, "temperature": cfg.temperature,
                     "mode": args.mode, "density": args.density, "describe": args.describe_images,
-                    "chunk_tokens": args.chunk_tokens, "prompt": PROMPT_VERSION, "system": SYSTEM_PROMPT}
+                    "chunk_tokens": args.chunk_tokens, "prompt": PROMPT_VERSION,
+                    "language": cfg.language, "system": system_prompt(cfg.language)}
         scope = digest(settings)
         # Saved selection means this run has already been explicitly confirmed.
         confirmation_key = "confirmed:" + scope
@@ -148,7 +152,7 @@ async def execute(args: argparse.Namespace, cfg: Config, console: Console) -> in
                 results, terms, failures = await run_book(source, selected, client, cache, scope,
                     args.mode, args.density, args.chunk_tokens, args.describe_images,
                     lambda _: progress.advance(task))
-            reports = write_epub(source, results, glossary_xhtml(terms), args.output)
+            reports = write_epub(source, results, glossary_xhtml(terms, cfg.language), args.output, language=cfg.language)
             for report in reports:
                 console.print(report, markup=False)
             console.print(f"Wrote {args.output}", markup=False)
@@ -182,3 +186,4 @@ def main() -> None:
         console.print(f"Error: {error}" if isinstance(error, (ValueError, FileNotFoundError)) else f"Error: {type(error).__name__}; check input EPUB and output permissions", markup=False)
         status = 1
     raise SystemExit(status)
+

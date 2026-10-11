@@ -1,6 +1,6 @@
 # summarize-epub
 
-Python 3.11+ command-line tool for standalone Traditional Chinese summaries of
+Python 3.11+ command-line tool for standalone English or Traditional Chinese summaries of
 selected English EPUB chapters, with original images, diagrams, code, CSS and fonts.
 
 ## Quick start
@@ -15,6 +15,8 @@ cp .env.example .env
 summarize-epub list book.epub
 summarize-epub run book.epub -o preview.epub --chapters 3-7 --preview
 summarize-epub run book.epub -o summary.epub --chapters 3-7,9
+summarize-epub run book.epub -o summary.en.epub --chapters 3-7,9 --language en
+summarize-epub run book.epub -o summary.zh-Hant.epub --chapters 3-7,9 --language zh-Hant
 ```
 
 `python -m summarize_epub` is equivalent. No selection flags on a terminal opens
@@ -31,6 +33,10 @@ summarize-epub run book.epub -o out.epub --all --mode full
 
 ## Options
 
+- `--language en|zh-Hant`: English or Traditional Chinese. Defaults to `zh-Hant`
+  (or `LLM_LANGUAGE` in the environment). Applies to prose, chapter titles, generated
+  image descriptions, glossary, navigation and EPUB language metadata. Protected
+  source images, captions and code remain unchanged. Works with both `--mode` values.
 - Selection: `--chapters 1,4,9-12`, `--chapter-titles TEXT` (repeatable, unique
   substring), `--all`, `--exclude 1,2`, `--preview`, `--dry-run`.
 - Front matter is skipped by default. Use `--no-skip-front-matter` to include it.
@@ -43,12 +49,14 @@ summarize-epub run book.epub -o out.epub --all --mode full
 CLI > environment > defaults. `.env.example` includes OpenAI, Anthropic, Gemini and
 DeepSeek blocks. Every `LLM_*` setting has a matching flag: `--api-key`, `--base-url`,
 `--model`, `--vision-model`, `--max-tokens`, `--temperature`, `--timeout`,
-`--concurrency`, `--input-price`, `--output-price`. Prices are USD per million tokens;
+`--concurrency`, `--input-price`, `--output-price`, `--language`. Prices are USD per million tokens;
 zero means unpriced. Estimates exclude retries, images and accumulated context.
 
 ## Resume, output and tests
 
 SQLite saves completed responses, selected indices, glossary and image hashes.
+English and Chinese responses, checkpoints, glossaries and generated image captions
+use separate cache keys, so changing language cannot resume the other language's output.
 Rerun the same command/cache to resume without another confirmation. `--no-cache`
 intentionally regenerates text; glossary/image caches persist. Interrupted requests
 not yet committed may have been billed remotely. Chapters/chunks run in order for
@@ -65,7 +73,7 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-25 offline tests cover preservation, chunking, selection, configuration, navigation,
+Offline tests cover language selection and isolation, preservation, chunking, selection, configuration, navigation,
 retry/fallback, vision deduplication and resume. The generated EPUB also reopens with
 EbookLib. Internal navigation validation always runs; `epubcheck` runs if on PATH.
 Exit codes: 0 completed, 2 chapter failures, 1 setup/output error, 130 interrupted.
@@ -76,3 +84,4 @@ and Traditional Chinese normalization cannot prove semantic fidelity. Long outpu
 may require a higher `--max-tokens`. Oversized indivisible blocks fail safely; DRM
 books are unsupported. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for configuration
 mapping, architecture, provider references and precise cache/preservation behaviour.
+

@@ -20,7 +20,9 @@ def traditional(fragment: str) -> str:
     return "".join(str(x) for x in doc.root.contents)
 
 
-def parse_response(response: str, existing: dict[str, str]) -> tuple[str, str, dict[str, str]]:
+def parse_response(response: str, existing: dict[str, str], language: str = "zh-Hant") -> tuple[str, str, dict[str, str]]:
+    if language not in {"en", "zh-Hant"}:
+        raise ValueError("language must be en or zh-Hant")
     if "<!DOCTYPE" in response.upper() or "<!ENTITY" in response.upper():
         raise ValueError("DTD/entities are forbidden in model output")
     parser = etree.XMLParser(resolve_entities=False, no_network=True)
@@ -30,7 +32,7 @@ def parse_response(response: str, existing: dict[str, str]) -> tuple[str, str, d
         raise ValueError("Return a well-formed XHTML fragment, without Markdown or preamble") from None
     if len(root) != 2 or (root.text or "").strip() or any((x.tail or "").strip() for x in root):
         raise ValueError("Expected only summary section and glossary dl")
-    doc = soup(traditional(response))
+    doc = soup(traditional(response) if language == "zh-Hant" else response)
     summary = doc.root.find("section", attrs={"data-role": "summary"}, recursive=False)
     glossary = doc.root.find("dl", attrs={"data-role": "glossary"}, recursive=False)
     if summary is None or glossary is None or not summary.get("data-title"):
@@ -58,6 +60,8 @@ def parse_response(response: str, existing: dict[str, str]) -> tuple[str, str, d
     return "".join(str(x) for x in summary.contents), str(summary["data-title"]), terms
 
 
-def glossary_xhtml(terms: dict[str, str]) -> str:
+def glossary_xhtml(terms: dict[str, str], language: str = "zh-Hant") -> str:
     rows = "".join(f"<dt>{escape(k)}</dt><dd>{escape(v)}</dd>" for k, v in sorted(terms.items()))
-    return "<h1>術語表</h1><dl>" + rows + "</dl>"
+    title = {"en": "Glossary", "zh-Hant": "術語表"}[language]
+    return f"<h1>{title}</h1><dl>" + rows + "</dl>"
+

@@ -203,7 +203,9 @@ def rewrite_links(body: str, source_path: str, output_path: str, mapping: dict[s
 
 
 def document(body: str, title: str, css_href: str, original_head: str = "<head/>",
-             body_attrs: dict[str, str] | None = None) -> bytes:
+             body_attrs: dict[str, str] | None = None, language: str = "zh-Hant") -> bytes:
+    if language not in {"en", "zh-Hant"}:
+        raise ValueError("language must be en or zh-Hant")
     head = soup(original_head).root.find("head")
     for old in list(head.find_all("title")):
         old.decompose()
@@ -218,11 +220,17 @@ def document(body: str, title: str, css_href: str, original_head: str = "<head/>
     attrs.pop("lang", None)
     attrs.pop("xml:lang", None)
     attr_text = "".join(f' {escape(str(k))}="{escape(str(v), quote=True)}"' for k, v in attrs.items())
-    raw = f'<html xmlns="{XHTML}" xmlns:epub="{EPUB}" xmlns:svg="http://www.w3.org/2000/svg" xmlns:m="http://www.w3.org/1998/Math/MathML" xml:lang="zh-Hant" lang="zh-Hant">{head}<body{attr_text}>{body}</body></html>'
+    raw = f'<html xmlns="{XHTML}" xmlns:epub="{EPUB}" xmlns:svg="http://www.w3.org/2000/svg" xmlns:m="http://www.w3.org/1998/Math/MathML" xml:lang="{language}" lang="{language}">{head}<body{attr_text}>{body}</body></html>'
     return serialize(xml(raw.encode()))
 
 
-def write_epub(source: Source, results: list[Result], glossary: str, destination: Path) -> list[str]:
+def write_epub(source: Source, results: list[Result], glossary: str, destination: Path,
+               language: str = "zh-Hant") -> list[str]:
+    if language not in {"en", "zh-Hant"}:
+        raise ValueError("language must be en or zh-Hant")
+    english = language == "en"
+    glossary_title = "Glossary" if english else "術語表"
+    contents_title = "Contents" if english else "目錄"
     log = logging.getLogger(__name__)
     package = copy.deepcopy(source.package)
     package.set("version", "3.0")
@@ -243,7 +251,8 @@ def write_epub(source: Source, results: list[Result], glossary: str, destination
         c = result.chapter
         prefix = f'<h1 class="original-title">{escape(c.title)}</h1>' if result.translated else ""
         if not result.translated:
-            prefix = '<p class="translation-warning">此章未能翻譯；以下保留原文。</p>'
+            warning = "This chapter could not be processed; the original is retained below." if english else "此章未能翻譯；以下保留原文。"
+            prefix = f'<p class="translation-warning">{warning}</p>'
         bodies[c.output_path] = ensure_anchors(prefix + result.body, c.body, c.index)
     anchors = {path: {str(x["id"]) for x in soup(body).find_all(id=True)} for path, body in bodies.items()}
     output: dict[str, bytes] = {}
@@ -251,11 +260,12 @@ def write_epub(source: Source, results: list[Result], glossary: str, destination
     for result in results:
         c = result.chapter
         body = rewrite_links(bodies[c.output_path], c.path, c.output_path, mapping, source.document_paths, set(source.members), anchors)
-        output[c.output_path] = document(body, result.title, relative(c.output_path, css_path), c.head, c.body_attrs)
+        output[c.output_path] = document(body, result.title, relative(c.output_path, css_path), c.head, c.body_attrs, language)
         subheadings = [(c.output_path + "#" + str(h["id"]), h.get_text(" ", strip=True)) for h in soup(body).find_all("h2")]
-        entries.append((c.output_path, result.title + ("（未翻譯）" if not result.translated else ""), subheadings))
-    output[glossary_path] = document(glossary, "術語表", relative(glossary_path, css_path))
-    entries.append((glossary_path, "術語表", []))
+        suffix = " (unprocessed)" if english else "（未翻譯）"
+        entries.append((c.output_path, result.title + (suffix if not result.translated else ""), subheadings))
+    output[glossary_path] = document(glossary, glossary_title, relative(glossary_path, css_path), language=language)
+    entries.append((glossary_path, glossary_title, []))
     for item in list(manifest):
         if resolve_path(source.opf_path, item.get("href", "")) in source.document_paths:
             manifest.remove(item)
@@ -290,12 +300,12 @@ def write_epub(source: Source, results: list[Result], glossary: str, destination
     for guide in package.findall(f"{{{OPF}}}guide"):
         package.remove(guide)
     for title in metadata.findall(f"{{{DC}}}title"):
-        title.text = (title.text or "") + "（中文摘要）"
+        title.text = (title.text or "") + (" (English summary)" if english else "（中文摘要）")
     if metadata.find(f"{{{DC}}}title") is None:
-        etree.SubElement(metadata, f"{{{DC}}}title").text = "中文摘要"
-    for language in metadata.findall(f"{{{DC}}}language"):
-        metadata.remove(language)
-    etree.SubElement(metadata, f"{{{DC}}}language").text = "zh-Hant"
+        etree.SubElement(metadata, f"{{{DC}}}title").text = "English summary" if english else "中文摘要"
+    for old_language in metadata.findall(f"{{{DC}}}language"):
+        metadata.remove(old_language)
+    etree.SubElement(metadata, f"{{{DC}}}language").text = language
     etree.SubElement(metadata, f"{{{DC}}}description").text = "Included source chapters: " + "; ".join(f"{r.chapter.index}: {r.chapter.title}" for r in results)
     from datetime import datetime, timezone
     for old in list(metadata):
@@ -313,12 +323,13 @@ def write_epub(source: Source, results: list[Result], glossary: str, destination
         ident.text = identifier
         package.set("unique-identifier", "summary-identifier")
     nav = etree.Element(f"{{{XHTML}}}html", nsmap={None: XHTML, "epub": EPUB})
-    nav.set("lang", "zh-Hant")
+    nav.set("lang", language)
+    nav.set("{http://www.w3.org/XML/1998/namespace}lang", language)
     head = etree.SubElement(nav, f"{{{XHTML}}}head")
-    etree.SubElement(head, f"{{{XHTML}}}title").text = "目錄"
+    etree.SubElement(head, f"{{{XHTML}}}title").text = contents_title
     nbody = etree.SubElement(nav, f"{{{XHTML}}}body")
     toc = etree.SubElement(nbody, f"{{{XHTML}}}nav", {f"{{{EPUB}}}type": "toc", "id": "toc"})
-    etree.SubElement(toc, f"{{{XHTML}}}h1").text = "目錄"
+    etree.SubElement(toc, f"{{{XHTML}}}h1").text = contents_title
     ol = etree.SubElement(toc, f"{{{XHTML}}}ol")
     ncx = etree.Element(f"{{{NCX}}}ncx", nsmap={None: NCX}, version="2005-1")
     nhead = etree.SubElement(ncx, f"{{{NCX}}}head")
@@ -405,3 +416,4 @@ def validate_navigation(path: Path) -> None:
         for item in items.values():
             if resolve_path(opf_path, item.get("href", "")) not in names:
                 raise ValueError(f"Missing manifest resource: {item.get('href')}")
+
